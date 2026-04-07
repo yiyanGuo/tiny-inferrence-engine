@@ -30,8 +30,7 @@ def basic_inference(model, inputs, max_new_tokens: int = 20):
         attention_mask = torch.cat([attention_mask, torch.ones_like(next_token)], dim=-1)
     end_time = time.time()
 
-    generated_texts = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
-    return {"generated_texts": generated_texts, "inference_time": end_time - start_time}
+    return {"generated_ids": input_ids, "inference_time": end_time - start_time}
 
 def kv_cache_inference(model, inputs, max_new_tokens: int = 20):
 
@@ -70,9 +69,8 @@ def kv_cache_inference(model, inputs, max_new_tokens: int = 20):
     
     end_time = time.time()
 
-    generated_texts = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
 
-    return {"generated_texts": generated_texts, "inference_time": end_time - start_time}
+    return {"generated_ids": generated_ids, "inference_time": end_time - start_time}
 
 
 if __name__ == "__main__":
