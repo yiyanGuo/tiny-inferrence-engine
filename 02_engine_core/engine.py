@@ -12,79 +12,81 @@ class Engine:
 
         self.logger = Logger()
 
-        self.queue = []
         self.kv_cache = {}  # {request_id: kv_cache}
         self.steps = 0
         self.max_new_tokens = 200
         # # TODO
-        # self.scheduler = Scheduler()
+        self.scheduler = Scheduler()
         # self.kv_cache_manager = None
     
-    def submit_request(self, prompts, request_id):
-        for i, prompt in enumerate(prompts):
-            inputs = self.tokenizer(prompt, return_tensors="pt", padding=True).to(self.device)
-            request = Request(
-                request_id=f"{request_id}_{i}", 
-                prompt=prompt, 
-                request_status=RequestStatus.PREFILLING, 
-                input_ids=inputs["input_ids"],
-                attention_mask=inputs["attention_mask"]
-            )
-            
-            # TODO： 改用scheduler管理请求
-            self.queue.append(request)
-    
-    def _get_active_requests(self):
-        return [req for req in self.queue if req.request_status != RequestStatus.FINISHED and req.request_status != RequestStatus.ABORTED]
-
-    def _get_prefilling_requests(self):
-        return [req for req in self.queue if req.request_status == RequestStatus.PREFILLING]
-
-    def _get_decoding_requests(self):
-        return [req for req in self.queue if req.request_status == RequestStatus.DECODING]
+    def submit_request(self, prompt, request_id):
+        inputs = self.tokenizer(prompt, return_tensors="pt", padding=True).to(self.device)
+        request = Request(
+            request_id=request_id,
+            request_status=RequestStatus.PREFILLING,
+            inputs=inputs
+        )
+        self.scheduler.submit_request(request)
     
     @torch.inference_mode()
-    def step(self):
-        # prefill
-        prefilling_reqs = self._get_prefilling_requests()
-        for req in prefilling_reqs:
-            outputs = self.model(input_ids=req.input_ids, attention_mask=req.attention_mask, use_cache=True)
+    def _prefill(self, requests: list[Request]):
+        # batch prefill
+        finished_request_ids = []
+        for req in requests:
+            outputs = self.model(input_ids=req.inputs["input_ids"], attention_mask=req.inputs["attention_mask"], use_cache=True)
             self.kv_cache[req.request_id] = outputs.past_key_values
             next_token_logits = outputs.logits[:, -1, :]
             next_token = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)
-            req.input_ids = torch.cat([req.input_ids, next_token], dim=-1)
-            req.attention_mask = torch.cat([req.attention_mask, torch.ones_like(next_token)], dim=-1)
+            req.inputs["input_ids"] = torch.cat([req.inputs["input_ids"], next_token], dim=-1)
+            req.inputs["attention_mask"] = torch.cat([req.inputs["attention_mask"]  , torch.ones_like(next_token)], dim=-1)
             req.request_status = RequestStatus.DECODING
         
-        # decode
-        decoding_reqs = self._get_decoding_requests()
-        for req in decoding_reqs:
+        return finished_request_ids
+    
+    @torch.inference_mode()
+    def _decode(self, requests: list[Request]):
+        finished_request_ids = []
+        for req in requests:
             kv_cache = self.kv_cache[req.request_id]
-            current_input_ids = req.input_ids[:, -1].unsqueeze(-1)
-            attention_mask = req.attention_mask
+            current_input_ids = req.inputs["input_ids"][:, -1].unsqueeze(-1)
+            attention_mask = req.inputs["attention_mask"]
             outputs = self.model(input_ids=current_input_ids, attention_mask=attention_mask, past_key_values=kv_cache, use_cache=True)
             self.kv_cache[req.request_id] = outputs.past_key_values
             next_token_logits = outputs.logits[:, -1, :]
             next_token = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)
-            if next_token.item() == self.tokenizer.eos_token_id or req.input_ids.shape[-1] >= self.max_new_tokens:
+            if next_token.item() == self.tokenizer.eos_token_id or req.inputs["input_ids"].shape[-1] >= self.max_new_tokens:
                 req.request_status = RequestStatus.FINISHED
+                finished_request_ids.append(req.request_id)
                 continue
-            req.input_ids = torch.cat([req.input_ids, next_token], dim=-1)
-            req.attention_mask = torch.cat([req.attention_mask, torch.ones_like(next_token)], dim=-1)
+            req.inputs["input_ids"] = torch.cat([req.inputs["input_ids"], next_token], dim=-1)
+            req.inputs["attention_mask"] = torch.cat([req.inputs["attention_mask"]  , torch.ones_like(next_token)], dim=-1)
+        
+        return finished_request_ids
+    @torch.inference_mode()
+    def step(self):
+        prefilling_reqs, decoding_reqs = self.scheduler.schedule()
+        finished_request_ids = []
+        # prefill
+        if prefilling_reqs:
+            finished_request_ids.extend(self._prefill(prefilling_reqs))
+        # decoding
+        if decoding_reqs:
+            finished_request_ids.extend(self._decode(decoding_reqs))
+        # update scheduler
+        self.scheduler.update_after_step(finished_request_ids)
     
     def run(self):
         print("Starting engine loop...")
 
         while True:
-            active_reqs = self._get_active_requests()
-            if not active_reqs:
+            if not self.scheduler.has_active_requests():
                 break
 
             self.step()
             self.steps += 1
 
             if self.steps % 10 == 0:
-                print(f"Step {self.steps}, {len(active_reqs)} active requests")
+                print(f"Step {self.steps}")
 
         print(f"All requests finished. After {self.steps} steps.")
 

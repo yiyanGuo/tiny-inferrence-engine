@@ -15,8 +15,10 @@ class Client:
 
     def submit_request(self, prompts):
         user_request_id = f"userequest_{self.user_request_id_counter}"
-        self.engine.submit_request(prompts, user_request_id)
-        self.user_request_id_counter += 1
+        for prompt in prompts:
+            request_id = f"{user_request_id}_{self.user_request_id_counter}"
+            self.engine.submit_request(prompt, request_id)
+            self.user_request_id_counter += 1
 
 
     def generate(self):

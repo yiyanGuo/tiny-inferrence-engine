@@ -30,7 +30,5 @@ class RequestRuntime:
 @dataclass
 class Request:
     request_id: str
-    prompt: Optional[str] = None
-    input_ids: Optional[Any] = None
-    attention_mask: Optional[Any] = None
+    inputs: Optional[dict] = None
     request_status: RequestStatus = None
